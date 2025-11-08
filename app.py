@@ -98,13 +98,19 @@ class RubikAutoGuide:
         
         h, w = frame.shape[:2]
         
-        # 初始化相机参数（如果未标定，使用默认值）
+        # 初始化相机参数（改进版：区分fx和fy）
+        # TODO: 使用棋盘格标定获得真实内参以提高PnP精度
+        fx = w * 0.9  # 横向焦距
+        fy = h * 0.9  # 纵向焦距
+        cx = w / 2.0  # 主点x
+        cy = h / 2.0  # 主点y
         self.camera_matrix = np.array([
-            [w * 0.8, 0, w / 2],
-            [0, w * 0.8, h / 2],
+            [fx, 0, cx],
+            [0, fy, cy],
             [0, 0, 1]
         ], dtype=np.float32)
         self.dist_coeffs = np.zeros(5, dtype=np.float32)
+        print(f"📷 相机内参: fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}")
         
         # 初始化各个模块
         # 使用YOLO11分割模型（精确轮廓检测 + 高精度识别）
@@ -446,26 +452,70 @@ class RubikAutoGuide:
         return g.reshape(-1).tolist()
     
     def recognize_current_state(self, frame: np.ndarray, bbox: tuple) -> bool:
-        """识别当前魔方状态（正确处理：颜色字母 vs 物理面）"""
+        """识别当前魔方状态（完整PnP链路：ROI→网格→位姿→颜色）"""
         x1, y1, x2, y2 = bbox
         
         # 提取ROI
         roi = frame[y1:y2, x1:x2]
-        if roi.size == 0:
+        if roi.size == 0 or roi.shape[0] < 50 or roi.shape[1] < 50:
             return False
         
-        # 仅使用同一面的色块进行拟合
+        # ===== 关键修复：先用PoseEstimator提取3×3网格 =====
+        # 这是PnP的必要输入！之前一直缺失导致rvec=None
+        grid_quads = self.pose_estimator.detect_face_grid(roi)
+        
+        if grid_quads is None or len(grid_quads) != 9:
+            # 调试信息：为什么没找到9个格子
+            if grid_quads is None:
+                print(f"⚠️ 未检测到网格 (grid_quads=None)")
+            else:
+                print(f"⚠️ 检测到{len(grid_quads)}个格子，需要9个")
+            return False
+        
+        # ===== 步骤1：PnP位姿估计 =====
+        pose_result = self.pose_estimator.estimate_pose_from_grid(
+            roi, grid_quads, roi_offset=(x1, y1)
+        )
+        
+        if pose_result is None:
+            print("⚠️ PnP失败")
+            return False
+        
+        rvec_raw, tvec_raw = pose_result
+        
+        # ===== 步骤2：位姿平滑（关键！避免HUD抖动） =====
+        if self.last_rvec is not None and self.last_tvec is not None:
+            # 指数移动平均
+            alpha = 0.3  # 平滑系数
+            rvec_raw = (1 - alpha) * self.last_rvec + alpha * rvec_raw
+            tvec_raw = (1 - alpha) * self.last_tvec + alpha * tvec_raw
+        
+        # 更新当前位姿
+        self.current_rvec = rvec_raw
+        self.current_tvec = tvec_raw
+        self.last_rvec = rvec_raw
+        self.last_tvec = tvec_raw
+        
+        # 更新平滑位姿（用于HUD渲染）
+        if self.rvec_smooth is None:
+            self.rvec_smooth = rvec_raw.copy()
+        else:
+            self.rvec_smooth = (1.0 - self.rvec_smooth_alpha) * self.rvec_smooth + self.rvec_smooth_alpha * rvec_raw
+        
+        print(f"✓ PnP成功: rvec norm={np.linalg.norm(rvec_raw):.3f}, tvec[2]={tvec_raw[2,0]:.3f}")
+        
+        # ===== 步骤3：颜色识别（使用YOLO检测结果） =====
         cluster = self._select_face_cluster(self.current_facelets)
         if not cluster or len(cluster) < 7:
-            return False
+            # 位姿有了，但颜色信息不足，至少位姿可以更新HUD
+            return True  # 改为True，因为位姿已经更新了
         
-        # ===== 步骤1：按3×3空间位置排序 =====
+        # 按3×3空间位置排序
         nine = self._order_facelets_3x3(cluster)
         if nine is None:
-            return False
+            return True  # 位姿有效，颜色排序失败，仍返回True
         
-        # ===== 步骤2：提取YOLO颜色名，转换成颜色字母 =====
-        # 颜色名 → 颜色字母（Kociemba标准）
+        # ===== 步骤4：提取YOLO颜色名，转换成颜色字母 =====
         COLOR_TO_LETTER = {
             'White': 'U',   'Yellow': 'D',  'Red': 'R',
             'Orange': 'L',  'Green': 'F',   'Blue': 'B'
@@ -477,7 +527,6 @@ class RubikAutoGuide:
             cls_id = det.get('cls', -1)
             if 0 <= cls_id < len(self.detector.model.names):
                 color_name = self.detector.model.names[cls_id]
-                # 忽略Center和Face类别，只用6个颜色
                 if color_name in COLOR_TO_LETTER:
                     raw_letters.append(COLOR_TO_LETTER[color_name])
                     raw_confs.append(det['conf'])
@@ -488,7 +537,7 @@ class RubikAutoGuide:
                 raw_letters.append('?')
                 raw_confs.append(0.0)
         
-        # ===== 步骤3：找到几何中心最近的格子（中心块） =====
+        # ===== 步骤5：找几何中心最近的格子（中心块） =====
         centers = np.array([[(d['x1']+d['x2'])/2., (d['y1']+d['y2'])/2.] for d in nine], np.float32)
         geo_center = centers.mean(0)
         dists = ((centers - geo_center)**2).sum(1)
@@ -505,137 +554,50 @@ class RubikAutoGuide:
         # 用中心块颜色填充所有'?'
         raw_letters = [center_letter if l == '?' else l for l in raw_letters]
         
-        # ===== 步骤4：从该聚类提取整面的外接四角（用于PnP） =====
-        outer_quad = self._outer_quad_from_facelets(nine)
-        if outer_quad is None:
-            return False
-        
-        # ===== 步骤5：PnP估计物理面（使用IPPE_SQUARE方法） =====
-        def face_axes(face_label):
-            """返回面的法向、右向、上向"""
-            axes = {
-                'F': (np.array([0,0, 1.0]), np.array([1,0,0]), np.array([0,1,0])),
-                'B': (np.array([0,0,-1.0]), np.array([-1,0,0]), np.array([0,1,0])),
-                'U': (np.array([0,1.0,0]), np.array([1,0,0]), np.array([0,0,-1])),
-                'D': (np.array([0,-1.0,0]), np.array([1,0,0]), np.array([0,0, 1])),
-                'R': (np.array([1.0,0,0]), np.array([0,0,-1]), np.array([0,1,0])),
-                'L': (np.array([-1.0,0,0]), np.array([0,0, 1]), np.array([0,1,0])),
+        # ===== 步骤6：用rvec判断可见面（F/B/U/D/L/R） =====
+        # 由于PnP已经在前面完成，这里用rvec推断物理面
+        def get_visible_face_from_rvec(rvec):
+            """根据rvec判断哪个面朝向相机"""
+            R, _ = cv2.Rodrigues(rvec)
+            # 定义6个面的法向量（物体坐标系）
+            face_normals = {
+                'F': np.array([0, 0, 1.0]),
+                'B': np.array([0, 0, -1.0]),
+                'U': np.array([0, 1.0, 0]),
+                'D': np.array([0, -1.0, 0]),
+                'R': np.array([1.0, 0, 0]),
+                'L': np.array([-1.0, 0, 0]),
             }
-            return axes[face_label]
+            # 找到z分量最大的（朝向相机）
+            best_face = None
+            best_z = -9999
+            for face_label, normal in face_normals.items():
+                n_cam = R @ normal
+                if n_cam[2] > best_z:
+                    best_z = n_cam[2]
+                    best_face = face_label
+            return best_face
         
-        def face_corners_TL_TR_BR_BL(face_label):
-            """生成面的3D角点（TL,TR,BR,BL顺序）"""
-            n, right, up = face_axes(face_label)
-            center = 0.5 * n
-            tl = center - 0.5*right + 0.5*up
-            tr = center + 0.5*right + 0.5*up
-            br = center + 0.5*right - 0.5*up
-            bl = center - 0.5*right - 0.5*up
-            return np.array([tl, tr, br, bl], dtype=np.float32)
+        visible_face = get_visible_face_from_rvec(self.current_rvec)
+        if visible_face is None:
+            visible_face = 'F'  # 默认前面
         
-        img_points = outer_quad.astype(np.float32)
-        best = None
-        for face_label in ['F','R','U','B','L','D']:
-            obj = face_corners_TL_TR_BR_BL(face_label)
-            try:
-                # 使用IPPE_SQUARE方法（专为正方形设计，更稳定）
-                ok, rvec, tvec = cv2.solvePnP(
-                    obj, img_points, 
-                    self.camera_matrix, self.dist_coeffs, 
-                    flags=cv2.SOLVEPNP_IPPE_SQUARE
-                )
-            except Exception:
-                ok = False
-            if not ok:
-                continue
-            
-            # 计算朝向与误差
-            Rm, _ = cv2.Rodrigues(rvec)
-            n = face_axes(face_label)[0].astype(np.float32)
-            n_cam = (Rm @ n.reshape(3,1))[2,0]
-            proj, _ = cv2.projectPoints(obj, rvec, tvec, self.camera_matrix, self.dist_coeffs)
-            proj = proj.reshape(-1,2)
-            err = float(np.mean(np.linalg.norm(proj - img_points, axis=1)))
-            
-            # 惩罚背对摄像机的解
-            cost = err + (100.0 if n_cam <= 0 else 0.0)
-            if (best is None) or (cost < best[0]):
-                best = (cost, face_label, rvec, tvec, Rm)
-        
-        if best is None:
-            return False
-        
-        best_cost, visible_face, rvec, tvec, Rm = best
-        
-        # ===== 步骤6：估计k×90°旋转（朝向校正） =====
-        # 用PnP的up/right向量投影到图像，判断需要旋转几次90°
-        n, right_obj, up_obj = face_axes(visible_face)
-        
-        # 投影到图像坐标
-        pts_3d = np.array([[0,0,0], right_obj, up_obj], dtype=np.float32)
-        pts_2d, _ = cv2.projectPoints(pts_3d, rvec, tvec, self.camera_matrix, self.dist_coeffs)
-        pts_2d = pts_2d.reshape(-1, 2)
-        
-        origin_2d = pts_2d[0]
-        right_2d = pts_2d[1] - origin_2d
-        up_2d = pts_2d[2] - origin_2d
-        
-        # 归一化
-        right_2d = right_2d / (np.linalg.norm(right_2d) + 1e-6)
-        up_2d = up_2d / (np.linalg.norm(up_2d) + 1e-6)
-        
-        # 理想情况：right≈(1,0), up≈(0,-1)（图像y轴向下）
-        # 计算实际方向与理想方向的夹角
-        ideal_right = np.array([1, 0])
-        ideal_up = np.array([0, -1])
-        
-        # 用right向量判断旋转角度
-        angle = np.arctan2(right_2d[1], right_2d[0])
-        angle_deg = np.degrees(angle)
-        
-        # 确定k（0/1/2/3对应0°/90°/180°/270°）
-        if -45 <= angle_deg < 45:
-            k = 0
-        elif 45 <= angle_deg < 135:
-            k = 1
-        elif angle_deg >= 135 or angle_deg < -135:
-            k = 2
-        else:
-            k = 3
-        
-        # ===== 步骤7：应用k×90°旋转到标签 =====
+        # ===== 步骤7：k×90°朝向校正（简化版） =====
+        # TODO: 根据实际投影方向估计k
+        k = 0  # 暂时简化，后续可根据投影校正
         labels = self._rotate_labels_3x3(raw_letters, k)
         
-        # ===== 步骤8：位姿平滑 & 质量门控 =====
-        if self.last_rvec is not None:
-            # 仅当重投影误差足够小才更新（阈值可按画面实际尺寸调）
-            if best_cost > 5.0:
-                # 忽略本帧，保持上一帧
-                rvec = self.last_rvec
-                tvec = self.last_tvec
-        
-        # 指数平滑，减少HUD抖动
-        if self.rvec_smooth is None:
-            self.rvec_smooth = rvec.copy()
-        else:
-            self.rvec_smooth = (1.0 - self.rvec_smooth_alpha) * self.rvec_smooth + self.rvec_smooth_alpha * rvec
-        
-        self.current_rvec = rvec
-        self.current_tvec = tvec
-        self.last_rvec = rvec
-        self.last_tvec = tvec
-        
-        # ===== 步骤9：保存显示信息 =====
+        # ===== 步骤8：保存显示信息 =====
         self._last_color_info = {
             'labels': labels,
             'percentages': [(lbl, conf*100) for lbl, conf in zip(labels, raw_confs)],
             'quads': None,
             'H': None,
             'roi_offset': (x1, y1),
-            'cluster': nine  # 使用排序后的nine
+            'cluster': nine
         }
         
-        # ===== 步骤10：更新StateManager（按物理面） =====
+        # ===== 步骤9：更新StateManager（按物理面） =====
         face_idx = self.FACE_TO_IDX[visible_face]
         success = self.state_manager.update_face(face_idx, labels, confidence=0.9)
         

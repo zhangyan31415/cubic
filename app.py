@@ -18,6 +18,12 @@ from src.solver_wrap import Solver, move_to_cn
 from src.core.overlay import OverlayRenderer
 from src.core.mini_cube_hud import MiniCubeHUD
 import yaml
+from src.vision_rotation import rotation_k_from_rvec, rotate_grid_labels
+
+try:
+    from ui.face_editor import FaceEditor
+except Exception:
+    FaceEditor = None
 
 
 def speak(text: str):
@@ -106,6 +112,8 @@ class App:
         self.solver = Solver()
         self.overlay = OverlayRenderer(K, dist)
         self.hud = MiniCubeHUD(size=220)
+        self.use_face_editor = bool((self.cfg.get('ui', {}) or {}).get('face_editor', False)) and FaceEditor is not None
+        self._editor = FaceEditor() if self.use_face_editor else None
 
         # runtime
         self.frame_id = 0
@@ -219,8 +227,13 @@ class App:
                         labels = self._order_labels(cluster)
                         if labels and '?' not in labels:
                             # Rotate grid to match camera orientation
-                            k = self.vision.rotation_k_from_rvec(self.current_rvec)
-                            labels = self.vision.rotate_grid_labels(labels, k)
+                            k = rotation_k_from_rvec(self.current_rvec)
+                            labels = rotate_grid_labels(labels, k)
+                            # Optional face editor for manual correction
+                            if self.use_face_editor:
+                                ok_ed, labels_ed = self._editor.edit_until_confirm(labels)
+                                if ok_ed:
+                                    labels = labels_ed
                             ok = self.cube.update_face_by_label(vis_face, labels, confidence=0.9)
                             if ok:
                                 comp = self.cube.completeness()

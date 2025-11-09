@@ -168,3 +168,29 @@ class StateManager:
             return state_string
         
         return None
+
+    # --- 新增：中心唯一性快速检查（基于当前字母状态） ---
+    def centers_ok(self) -> bool:
+        """检查六个中心贴（位置[1,1]）是否各不相同，且与面序一致（可选）。"""
+        centers = []
+        for idx, face in enumerate(self.FACE_ORDER):
+            c = self.facelet_state[idx, 1, 1]
+            if c is None:
+                return False
+            centers.append(c)
+        return len(set(centers)) == 6
+
+    # --- 新增：完整可解性预检（计数 + Kociemba 预检） ---
+    def check_solvability_full(self) -> bool:
+        state_str = self.build_state_string()
+        if state_str is None:
+            return False
+        ok, _ = self.check_counts(state_str)
+        if not ok:
+            return False
+        try:
+            import kociemba
+            _ = kociemba.solve(state_str)
+            return True
+        except Exception:
+            return False

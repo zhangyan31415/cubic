@@ -74,8 +74,9 @@ class NetHUD:
                     letter = colors[i][j]
                     bgr = LETTER_TO_BGR.get(letter if letter in LETTER_TO_BGR else face_letter, (60, 60, 60))
                     # Compute pixel rect
+                    # fc is already in tile units (0,3,6,9). fr is in face rows (0,1,2) -> needs *3 tiles
                     cx = x0 + (fc + j) * tile + (fc // 3) * gap
-                    cy = y0 + (fr + i) * tile + (fr // 3) * gap
+                    cy = y0 + (fr * 3 + i) * tile + (fr * gap)
                     x1, y1 = cx, cy
                     x2, y2 = cx + tile - 1, cy + tile - 1
                     cv2.rectangle(img, (x1, y1), (x2, y2), bgr, -1)
@@ -89,4 +90,3 @@ class NetHUD:
         for face in ['U', 'L', 'F', 'R', 'B', 'D']:
             draw_face(face)
         return img
-

@@ -38,6 +38,7 @@ class CubeVision:
         self.last_tvec = None
         self.rvec_smooth = None
         self.rvec_smooth_alpha = float(ema_alpha)
+        self.default_conf = float(default_conf)
 
     def detect_facelets(self, frame) -> List[dict]:
         detections = self.detector.detect(frame, conf_threshold=self.default_conf)

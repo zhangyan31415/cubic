@@ -17,9 +17,15 @@ class CubeVision:
 
     def __init__(self, camera_matrix: np.ndarray, dist_coeffs: np.ndarray,
                  model_path: str = "models/rubik_cube_yolo11_seg.pt",
-                 device: str = 'cpu', half: bool = False):
-        self.detector = LocalYOLODetector(model_path=model_path, device=device, half=half)
-        self.pose = PoseEstimator(camera_matrix, dist_coeffs)
+                 device: str = 'cpu', half: bool = False,
+                 allowed_names: Optional[List[str]] = None,
+                 default_conf: float = 0.5,
+                 ema_alpha: float = 0.25,
+                 refine_lm: bool = False):
+        self.detector = LocalYOLODetector(model_path=model_path, device=device, half=half,
+                                          allowed_names=set(allowed_names) if allowed_names else None,
+                                          default_conf=default_conf)
+        self.pose = PoseEstimator(camera_matrix, dist_coeffs, refine_lm=refine_lm)
         self.tracker = SimpleTracker()
 
         self.current_facelets: List[dict] = []
@@ -27,7 +33,7 @@ class CubeVision:
         self.last_rvec = None
         self.last_tvec = None
         self.rvec_smooth = None
-        self.rvec_smooth_alpha = 0.25
+        self.rvec_smooth_alpha = float(ema_alpha)
 
     def detect_facelets(self, frame) -> List[dict]:
         detections = self.detector.detect(frame, conf_threshold=0.5)
@@ -132,6 +138,92 @@ class CubeVision:
                 quads.append(np.stack([p00,p10,p11,p01],axis=0))
         return quads
 
+    # ---- Fallbacks: outer quad + warp-to-square + uniform 3x3 ----
+    @staticmethod
+    def _order_tl_tr_br_bl(pts: np.ndarray) -> Optional[np.ndarray]:
+        pts = np.asarray(pts, dtype=np.float32)
+        if pts.ndim != 2 or pts.shape[0] < 4 or pts.shape[1] != 2:
+            return None
+        rect = cv2.minAreaRect(pts)
+        box = cv2.boxPoints(rect).astype(np.float32)
+        s = box.sum(1)
+        d = np.diff(box, axis=1).ravel()
+        tl = box[np.argmin(s)]; br = box[np.argmax(s)]
+        tr = box[np.argmin(d)]; bl = box[np.argmax(d)]
+        return np.stack([tl, tr, br, bl], axis=0)
+
+    def _outer_quad_from_dets(self, dets: List[dict]) -> Optional[np.ndarray]:
+        if not dets:
+            return None
+        corners = []
+        for d in dets:
+            x1,y1,x2,y2 = d['x1'], d['y1'], d['x2'], d['y2']
+            corners.extend([(x1,y1),(x2,y1),(x2,y2),(x1,y2)])
+            pts = d.get('points')
+            if pts and len(pts) >= 3:
+                corners.extend(pts)
+        return self._order_tl_tr_br_bl(np.array(corners, dtype=np.float32))
+
+    @staticmethod
+    def _warp_to_square(img, quad_xy, out_size=300):
+        quad = np.array(quad_xy, dtype=np.float32)
+        dst = np.float32([[0,0],[out_size-1,0],[out_size-1,out_size-1],[0,out_size-1]])
+        H = cv2.getPerspectiveTransform(quad, dst)
+        face = cv2.warpPerspective(img, H, (out_size, out_size), flags=cv2.INTER_LINEAR)
+        return face, H
+
+    @staticmethod
+    def _uniform_quads(out_size=300, margin=20):
+        cs = out_size // 3
+        quads = []
+        for i in range(3):
+            for j in range(3):
+                x1 = j * cs + margin
+                y1 = i * cs + margin
+                x2 = (j + 1) * cs - margin
+                y2 = (i + 1) * cs - margin
+                quad = np.array([[x1,y1],[x2,y1],[x2,y2],[x1,y2]], np.float32)
+                quads.append(quad)
+        return quads
+
+    def fallback_quads_via_contour(self, frame, detections: Optional[List[dict]] = None) -> Optional[list]:
+        dets = detections if detections is not None else self.current_facelets
+        if not dets:
+            return None
+        cluster = self.select_face_cluster(dets)
+        src = cluster if cluster else dets
+        quad = self._outer_quad_from_dets(src)
+        if quad is None:
+            return None
+        face, H = self._warp_to_square(frame, quad, out_size=300)
+        # build uniform grid in square coords
+        quads_sq = self._uniform_quads(out_size=300, margin=20)
+        # map back to original image via H^-1
+        Hinv = np.linalg.inv(H)
+        quads_img = []
+        for q in quads_sq:
+            pts = q.reshape(-1,1,2).astype(np.float32)
+            mapped = cv2.perspectiveTransform(pts, Hinv).reshape(-1,2)
+            quads_img.append(mapped)
+        return quads_img
+
+    # ---- Rotation from rvec to k×90° and apply to labels ----
+    @staticmethod
+    def rotation_k_from_rvec(rvec: np.ndarray) -> int:
+        if rvec is None:
+            return 0
+        R, _ = cv2.Rodrigues(rvec)
+        # Project cube local x-axis to image plane (approx using camera X-Y)
+        face_x = R @ np.array([1.0, 0.0, 0.0])
+        angle = np.arctan2(face_x[1], face_x[0])  # against image x-axis
+        k = int(np.round(angle / (np.pi/2))) % 4
+        return k
+
+    @staticmethod
+    def rotate_grid_labels(labels9: List[str], k: int) -> List[str]:
+        g = np.array(labels9).reshape(3,3)
+        return np.rot90(g, -k).reshape(-1).tolist()
+
     def estimate_pose_from_quads(self, frame, quads) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         if quads is None or len(quads)!=9:
             return None
@@ -192,4 +284,3 @@ class CubeVision:
         if any(grid[r][c] is None for r in range(3) for c in range(3)):
             return None
         return [grid[r][c] for r in range(3) for c in range(3)]
-

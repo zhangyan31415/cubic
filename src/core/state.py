@@ -78,12 +78,17 @@ class StateManager:
     
     def check_solvability(self, state_string: str) -> bool:
         """
-        检查魔方是否可解（基本检查）
-        完整检查包括：边翻转、角扭转、置换奇偶性等
-        这里只做计数检查，详细检查由Kociemba库完成
+        检查魔方是否可解：先计数，再用kociemba做一致性预检。
         """
         valid, _ = self.check_counts(state_string)
-        return valid
+        if not valid:
+            return False
+        try:
+            import kociemba
+            _ = kociemba.solve(state_string)
+            return True
+        except Exception:
+            return False
     
     def get_completeness(self) -> float:
         """获取状态完整度（0-1），按面计算"""
@@ -163,4 +168,3 @@ class StateManager:
             return state_string
         
         return None
-

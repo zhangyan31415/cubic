@@ -126,7 +126,8 @@ class LocalYOLODetector:
     本地 YOLO 检测器（使用下载的预训练模型）
     """
     
-    def __init__(self, model_path: str = "models/rubik_roboflow.pt", device: str = '0', half: bool = True):
+    def __init__(self, model_path: str = "models/rubik_roboflow.pt", device: str = '0', half: bool = True,
+                 allowed_names: Optional[set] = None, default_conf: float = 0.5):
         """
         初始化
         Args:
@@ -138,6 +139,8 @@ class LocalYOLODetector:
         self.model = None
         self.device = device
         self.half = half
+        self.allowed_names = set(allowed_names) if allowed_names else None
+        self.default_conf = float(default_conf)
         
         try:
             from ultralytics import YOLO
@@ -173,13 +176,15 @@ class LocalYOLODetector:
         except ImportError:
             print("⚠ ultralytics 未安装，请运行: pip install ultralytics")
     
-    def detect(self, frame: np.ndarray, conf_threshold: float = 0.5):
+    def detect(self, frame: np.ndarray, conf_threshold: float = None):
         """检测魔方（GPU + FP16 加速）
         Returns:
             List of detection dicts with keys: x1, y1, x2, y2, conf, cls, points (if segmentation)
         """
         if self.model is None:
             return []
+        if conf_threshold is None:
+            conf_threshold = self.default_conf
         
         # 使用 GPU + FP16
         results = self.model.predict(
@@ -204,6 +209,16 @@ class LocalYOLODetector:
                 except Exception:
                     cls_id = -1
                 
+                # Class filtering by allowed_names (if provided)
+                if self.allowed_names is not None and hasattr(self.model, 'names'):
+                    try:
+                        class_name = self.model.names[cls_id]
+                        if class_name not in self.allowed_names:
+                            continue
+                    except Exception:
+                        # If cannot resolve class name, keep the detection
+                        pass
+
                 det = {
                     'x1': int(x1),
                     'y1': int(y1),

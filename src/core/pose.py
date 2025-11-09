@@ -9,7 +9,7 @@ from typing import List, Optional, Tuple
 class PoseEstimator:
     """魔方位姿估计器"""
     
-    def __init__(self, camera_matrix: np.ndarray, dist_coeffs: np.ndarray):
+    def __init__(self, camera_matrix: np.ndarray, dist_coeffs: np.ndarray, refine_lm: bool = False):
         """
         初始化位姿估计器
         Args:
@@ -18,6 +18,7 @@ class PoseEstimator:
         """
         self.K = camera_matrix
         self.dist = dist_coeffs
+        self.refine_lm = bool(refine_lm)
         
         # 魔方3D模型（单位立方体，边长=1）
         # 定义6个面的角点（相对于魔方中心）
@@ -155,8 +156,14 @@ class PoseEstimator:
             obj_points, img_points, self.K, self.dist,
             flags=cv2.SOLVEPNP_ITERATIVE
         )
-        
+
         if success:
+            # Optional refine using Levenberg–Marquardt
+            if self.refine_lm and hasattr(cv2, 'solvePnPRefineLM'):
+                try:
+                    rvec, tvec = cv2.solvePnPRefineLM(obj_points, img_points, self.K, self.dist, rvec, tvec)
+                except Exception:
+                    pass
             return (rvec, tvec)
         return None
     
@@ -171,4 +178,3 @@ class PoseEstimator:
         cx = width / 2
         cy = height / 2
         return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-

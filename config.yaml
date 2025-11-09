@@ -1,0 +1,16 @@
+model_path: models/rubik_cube_yolo11_seg.pt
+detector:
+  conf: 0.45
+  allowed_names: [Blue, Green, Red, Orange, White, Yellow]
+smoothing:
+  ema_alpha: 0.25
+camera:
+  # If any of these are null, app will derive from first frame size.
+  matrix: null  # [[fx, 0, cx],[0, fy, cy],[0,0,1]]
+  dist: [0.0, 0.0, 0.0, 0.0, 0.0]
+  use_refine_lm: true
+keys:
+  reset: R
+  quit: ESC
+tts:
+  enabled: true

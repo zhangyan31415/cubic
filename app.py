@@ -17,6 +17,7 @@ from src.cube_state import CubeState
 from src.solver_wrap import Solver, move_to_cn
 from src.core.overlay import OverlayRenderer
 from src.core.mini_cube_hud import MiniCubeHUD
+import yaml
 
 
 def speak(text: str):
@@ -62,14 +63,25 @@ def put_text_cn(img_bgr, text, xy=(20, 40), font_size=24, color=(0, 255, 0)):
 
 class App:
     def __init__(self, cam_id: int = 0):
+        # Load config
+        with open("config.yaml", "r") as f:
+            self.cfg = yaml.safe_load(f) or {}
+
         cam = Camera(cam_id).open()
         frame = cam.read()
         h, w = frame.shape[:2]
-        fx, fy = w * 0.9, h * 0.9
-        cx, cy = w / 2.0, h / 2.0
-        K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
-        dist = np.zeros(5, dtype=np.float32)
-        print(f"📷 相机内参: fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}")
+        # Camera params from config if present
+        cam_cfg = (self.cfg or {}).get('camera', {}) or {}
+        if cam_cfg.get('matrix'):
+            K = np.array(cam_cfg['matrix'], dtype=np.float32)
+            cx, cy = float(K[0][2]), float(K[1][2])
+            fx, fy = float(K[0][0]), float(K[1][1])
+        else:
+            fx, fy = w * 0.9, h * 0.9
+            cx, cy = w / 2.0, h / 2.0
+            K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)
+        dist = np.array(cam_cfg.get('dist', [0,0,0,0,0]), dtype=np.float32)
+        print(f"📷 相机内参: fx={fx:.1f}, fy={fy:.1f}, cx={cx:.1f}, cy={cy:.1f}; refineLM={cam_cfg.get('use_refine_lm', True)}")
 
         # device auto selection
         import torch
@@ -81,7 +93,15 @@ class App:
             device, half = 'cpu', False
 
         self.camera = cam
-        self.vision = CubeVision(K, dist, model_path="models/rubik_cube_yolo11_seg.pt", device=device, half=half)
+        model_path = (self.cfg.get('model_path') or "models/rubik_cube_yolo11_seg.pt")
+        det_cfg = self.cfg.get('detector', {}) or {}
+        allowed = det_cfg.get('allowed_names', None)
+        default_conf = float(det_cfg.get('conf', 0.45))
+        ema_alpha = float((self.cfg.get('smoothing', {}) or {}).get('ema_alpha', 0.25))
+        refine_lm = bool(cam_cfg.get('use_refine_lm', True))
+        self.vision = CubeVision(K, dist, model_path=model_path, device=device, half=half,
+                                 allowed_names=allowed, default_conf=default_conf,
+                                 ema_alpha=ema_alpha, refine_lm=refine_lm)
         self.cube = CubeState()
         self.solver = Solver()
         self.overlay = OverlayRenderer(K, dist)
@@ -182,8 +202,11 @@ class App:
                 # Build grid and pose every 5 frames to reduce load
                 if self.frame_id % 5 == 0:
                     quads = self.vision.build_grid_from_segmentation(facelets)
-                    if quads is None:
-                        print("⚠️ 未检测到网格 (来自分割聚类)")
+                    if quads is None or len(quads) != 9:
+                        # Fallback via contour/warp
+                        quads = self.vision.fallback_quads_via_contour(frame, facelets)
+                    if quads is None or len(quads) != 9:
+                        print("⚠️ 未检测到网格 (分割与兜底均失败)")
                     else:
                         pose = self.vision.estimate_pose_from_quads(frame, quads)
                         if pose is not None:
@@ -195,6 +218,9 @@ class App:
                     if cluster and len(cluster) >= 7:
                         labels = self._order_labels(cluster)
                         if labels and '?' not in labels:
+                            # Rotate grid to match camera orientation
+                            k = self.vision.rotation_k_from_rvec(self.current_rvec)
+                            labels = self.vision.rotate_grid_labels(labels, k)
                             ok = self.cube.update_face_by_label(vis_face, labels, confidence=0.9)
                             if ok:
                                 comp = self.cube.completeness()
@@ -285,4 +311,3 @@ if __name__ == "__main__":
         print(f"错误: {e}")
         import traceback
         traceback.print_exc()
-

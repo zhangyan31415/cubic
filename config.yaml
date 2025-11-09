@@ -9,6 +9,8 @@ camera:
   matrix: null  # [[fx, 0, cx],[0, fy, cy],[0,0,1]]
   dist: [0.0, 0.0, 0.0, 0.0, 0.0]
   use_refine_lm: true
+  # Optional capture resolution, e.g., [1280, 720]
+  resolution: null
 keys:
   reset: R
   quit: ESC
@@ -16,3 +18,7 @@ tts:
   enabled: true
 ui:
   face_editor: false
+yolo:
+  imgsz: 640
+  iou: 0.5
+  max_det: 100

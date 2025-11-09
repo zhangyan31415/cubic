@@ -74,6 +74,14 @@ class App:
             self.cfg = yaml.safe_load(f) or {}
 
         cam = Camera(cam_id).open()
+        # 可选设置摄像头分辨率（来自配置）
+        cam_cfg = (self.cfg or {}).get('camera', {}) or {}
+        res = cam_cfg.get('resolution')
+        if isinstance(res, (list, tuple)) and len(res) == 2:
+            try:
+                cam.set_resolution(int(res[0]), int(res[1]))
+            except Exception:
+                pass
         frame = cam.read()
         h, w = frame.shape[:2]
         # Camera params from config if present
@@ -105,9 +113,13 @@ class App:
         default_conf = float(det_cfg.get('conf', 0.45))
         ema_alpha = float((self.cfg.get('smoothing', {}) or {}).get('ema_alpha', 0.25))
         refine_lm = bool(cam_cfg.get('use_refine_lm', True))
+        yolo_cfg = self.cfg.get('yolo', {}) or {}
         self.vision = CubeVision(K, dist, model_path=model_path, device=device, half=half,
                                  allowed_names=allowed, default_conf=default_conf,
-                                 ema_alpha=ema_alpha, refine_lm=refine_lm)
+                                 ema_alpha=ema_alpha, refine_lm=refine_lm,
+                                 imgsz=int(yolo_cfg.get('imgsz', 640)),
+                                 iou=float(yolo_cfg.get('iou', 0.5)),
+                                 max_det=int(yolo_cfg.get('max_det', 100)))
         self.cube = CubeState()
         self.solver = Solver()
         self.overlay = OverlayRenderer(K, dist)
@@ -143,30 +155,32 @@ class App:
             cv2.putText(display, f"{conf:.2f}", (int(bx1), int(by1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
         return display
 
-    def _order_labels(self, cluster: list) -> Optional[list]:
+    def _order_labels(self, cluster: list):
+        """返回 (labels9, center_letter)。labels9 为 3×3 展平的面字母序列。"""
         nine = self.vision.order_facelets_3x3(cluster)
         if nine is None:
-            return None
+            return None, None
         names = getattr(self.vision.detector.model, 'names', {})
         letters = []
         for d in nine:
             cls_id = d.get('cls', -1)
-            if 0 <= cls_id < len(names):
-                color_name = names[cls_id]
-                letters.append(self.vision.COLOR_TO_LETTER.get(color_name, '?'))
+            # names 可能是 list 或 dict
+            if isinstance(names, dict):
+                color_name = names.get(cls_id, '?')
             else:
-                letters.append('?')
-        # center fallback
+                color_name = names[cls_id] if 0 <= cls_id < len(names) else '?'
+            letters.append(self.vision.COLOR_TO_LETTER.get(color_name, '?'))
+        # 估计几何中心作为中心块索引
         centers = np.array([[(d['x1']+d['x2'])/2., (d['y1']+d['y2'])/2.] for d in nine], np.float32)
-        geo = centers.mean(0); idx = int(np.argmin(((centers-geo)**2).sum(1)))
+        geo = centers.mean(0)
+        idx = int(np.argmin(((centers-geo)**2).sum(1)))
         center_letter = letters[idx]
         if center_letter == '?':
             from collections import Counter
             c = Counter([x for x in letters if x != '?'])
-            if c:
-                center_letter = c.most_common(1)[0][0]
+            center_letter = c.most_common(1)[0][0] if c else '?'
         letters = [center_letter if x == '?' else x for x in letters]
-        return letters
+        return letters, center_letter
 
     def _check_move_completion(self) -> bool:
         current_state = self.cube.get_stable_state()
@@ -224,17 +238,19 @@ class App:
                 if self.current_rvec is not None:
                     vis_face = self.vision.visible_face_from_rvec(self.current_rvec) or 'F'
                     if cluster and len(cluster) >= 7:
-                        labels = self._order_labels(cluster)
-                        if labels and '?' not in labels:
-                            # Rotate grid to match camera orientation
+                        labels, center_letter = self._order_labels(cluster)
+                        if labels and center_letter and '?' not in labels and center_letter != '?':
+                            # 面内旋转仅由 rvec 量化，用于统一九宫格方向
                             k = rotation_k_from_rvec(self.current_rvec)
                             labels = rotate_grid_labels(labels, k)
-                            # Optional face editor for manual correction
+                            # 可选人工校对
                             if self.use_face_editor:
                                 ok_ed, labels_ed = self._editor.edit_until_confirm(labels)
                                 if ok_ed:
                                     labels = labels_ed
-                            ok = self.cube.update_face_by_label(vis_face, labels, confidence=0.9)
+                            # 用中心颜色锚定的面字母写入状态（不再用 rvec 判定）
+                            face_letter = center_letter
+                            ok = self.cube.update_face_by_label(face_letter, labels, confidence=0.9)
                             if ok:
                                 comp = self.cube.completeness()
                                 if comp >= 1.0/6 and self._last_completeness < 1.0/6:

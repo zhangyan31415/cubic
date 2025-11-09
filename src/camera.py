@@ -14,6 +14,16 @@ class Camera:
             raise RuntimeError("无法打开摄像头")
         return self
 
+    def set_resolution(self, width: int, height: int):
+        """Attempt to set camera capture resolution."""
+        if self.cap is None:
+            return
+        try:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(width))
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(height))
+        except Exception:
+            pass
+
     def read(self):
         if self.cap is None:
             raise RuntimeError("Camera not opened")
@@ -26,4 +36,3 @@ class Camera:
         if self.cap is not None:
             self.cap.release()
             self.cap = None
-

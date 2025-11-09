@@ -21,10 +21,14 @@ class CubeVision:
                  allowed_names: Optional[List[str]] = None,
                  default_conf: float = 0.5,
                  ema_alpha: float = 0.25,
-                 refine_lm: bool = False):
+                 refine_lm: bool = False,
+                 imgsz: int = 640,
+                 iou: float = 0.5,
+                 max_det: int = 100):
         self.detector = LocalYOLODetector(model_path=model_path, device=device, half=half,
                                           allowed_names=set(allowed_names) if allowed_names else None,
-                                          default_conf=default_conf)
+                                          default_conf=default_conf,
+                                          imgsz=imgsz, iou=iou, max_det=max_det)
         self.pose = PoseEstimator(camera_matrix, dist_coeffs, refine_lm=refine_lm)
         self.tracker = SimpleTracker()
 
@@ -36,7 +40,7 @@ class CubeVision:
         self.rvec_smooth_alpha = float(ema_alpha)
 
     def detect_facelets(self, frame) -> List[dict]:
-        detections = self.detector.detect(frame, conf_threshold=0.5)
+        detections = self.detector.detect(frame, conf_threshold=self.default_conf)
         self.current_facelets = detections
         return detections
 

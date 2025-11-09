@@ -127,7 +127,8 @@ class LocalYOLODetector:
     """
     
     def __init__(self, model_path: str = "models/rubik_roboflow.pt", device: str = '0', half: bool = True,
-                 allowed_names: Optional[set] = None, default_conf: float = 0.5):
+                 allowed_names: Optional[set] = None, default_conf: float = 0.5,
+                 imgsz: int = 640, iou: float = 0.5, max_det: int = 100):
         """
         初始化
         Args:
@@ -141,6 +142,9 @@ class LocalYOLODetector:
         self.half = half
         self.allowed_names = set(allowed_names) if allowed_names else None
         self.default_conf = float(default_conf)
+        self.imgsz = int(imgsz)
+        self.iou = float(iou)
+        self.max_det = int(max_det)
         
         try:
             from ultralytics import YOLO
@@ -192,7 +196,10 @@ class LocalYOLODetector:
             conf=conf_threshold, 
             verbose=False,
             device=self.device,
-            half=self.half
+            half=self.half,
+            imgsz=self.imgsz,
+            iou=self.iou,
+            max_det=self.max_det
         )
         
         detections = []

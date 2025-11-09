@@ -1,10 +1,11 @@
 # 🎲 AI Rubik's Cube Solver
 
-基于YOLO11分割模型的魔方自动识别与求解系统。
+基于 YOLO11 分割的魔方自动识别与求解系统，已模块化重构为“分割掩膜 → 聚类拼 3×3 网格 → PnP 位姿 → 状态构建 → Kociemba 求解 → AR 指引”的稳定管线。
 
 ## ✨ 特性
 
-- 🤖 **YOLO11-seg** 实时检测魔方色块（mAP50: 97.9%）
+- 🤖 **YOLO11‑seg** 实时检测魔方色块（mAP50: 97.9%）
+- 🧩 **分割拼网格** 直接用分割轮廓聚类+PCA 构造 3×3 网格（更稳）
 - 🎯 **自动识别** 魔方6个面的状态
 - 🧩 **Kociemba算法** 快速求解（<1秒）
 - 🎨 **3D可视化** 实时显示魔方状态和求解步骤
@@ -33,8 +34,7 @@ python app.py
 4. 识别完成后，按照3D提示完成求解
 
 **快捷键：**
-- `空格` - 开始/暂停识别
-- `r` - 重置状态
+- `R` - 重置状态
 - `ESC` - 退出
 
 ## 🧪 测试工具
@@ -68,33 +68,36 @@ python train_segmentation.py
 - **类别**: 8个 (Blue, Center, Face, Green, Orange, Red, White, Yellow)
 - **性能**: mAP50=97.9%, 推理速度=0.9ms/帧 (H200 GPU)
 
-## 📁 项目结构
+## 📁 项目结构（已模块化重构）
 
 ```
 cubic/
-├── app.py                          # 主程序
-├── train_segmentation.py           # 训练脚本
-├── models/                         # 模型文件
-│   └── rubik_cube_yolo11_seg.pt   # 训练好的YOLO11模型
-├── src/                           # 核心代码
-│   ├── core/                      # 核心功能模块
-│   │   ├── state.py              # 状态管理
-│   │   ├── solver.py             # Kociemba求解器
-│   │   ├── pose.py               # 位姿估计
-│   │   ├── mini_cube_hud.py      # 3D可视化
-│   │   └── ...
-│   └── detectors/                # 检测器
-│       └── roboflow_detector.py  # YOLO检测器
-└── test_color_detect/            # 测试工具
-    ├── test_full_pipeline.py     # 完整流程测试
-    └── test_roboflow_api.py      # API测试
+├── app.py                           # 主程序（新：模块化调度）
+├── models/
+│   └── rubik_cube_yolo11_seg.pt     # YOLO11 分割模型
+├── src/
+│   ├── camera.py                    # 相机封装
+│   ├── vision.py                    # 视觉管线：分割→聚类→网格→PnP
+│   ├── cube_state.py                # 状态封装（基于 StateManager）
+│   ├── solver_wrap.py               # 求解封装 + 中文步骤
+│   ├── core/
+│   │   ├── pose.py                  # 位姿估计（OpenCV solvePnP）
+│   │   ├── state.py                 # 状态管理
+│   │   ├── solver.py                # Kociemba 求解器
+│   │   ├── mini_cube_hud.py         # 3D 迷你魔方 HUD
+│   │   └── overlay.py               # 叠加箭头/辅助线
+│   └── detectors/
+│       └── roboflow_detector.py     # YOLO 检测器（分割轮廓点）
+└── test_color_detect/
+    ├── test_full_pipeline.py        # 完整流程测试
+    └── test_roboflow_api.py         # API 测试
 ```
 
 ## 🔧 技术栈
 
 - **检测**: YOLO11-seg (Ultralytics)
 - **求解**: Kociemba Algorithm
-- **位姿估计**: OpenCV solvePnP (IPPE_SQUARE)
+- **位姿估计**: OpenCV solvePnP（平面目标，含位姿平滑）
 - **3D渲染**: OpenCV + NumPy
 - **深度学习框架**: PyTorch
 
@@ -120,4 +123,11 @@ MIT License
 
 ## 🐛 问题反馈
 
-如有问题，请提交Issue。
+如有问题，请提交 Issue。
+
+## 🆕 重构说明（要点）
+
+- 由“ROI 内边缘/九宫格检测”改为“分割轮廓→聚类→PCA→等距网格线”直接拼 3×3 网格，显著降低光照/反光/无黑边环境下的失败率。
+- PnP 基于全图坐标的 9 个小格中心点，配合指数平滑，HUD 更稳。
+- 主程序解耦为 `camera / vision / cube_state / solver_wrap` 四个模块，便于替换检测器或扩展到其它阶数。
+- 键位调整：移除空格键，保留 `R`（重置）、`ESC`（退出）。

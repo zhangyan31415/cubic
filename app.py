@@ -17,6 +17,7 @@ from src.cube_state import CubeState
 from src.solver_wrap import Solver, move_to_cn
 from src.core.overlay import OverlayRenderer
 from src.core.mini_cube_hud import MiniCubeHUD
+from src.core.net_hud import NetHUD
 import yaml
 from src.vision_rotation import rotation_k_from_rvec, rotate_grid_labels
 
@@ -124,6 +125,7 @@ class App:
         self.solver = Solver()
         self.overlay = OverlayRenderer(K, dist)
         self.hud = MiniCubeHUD(size=220)
+        self.net_hud = NetHUD(margin=10, tile_gap=2, label=False)
         self.use_face_editor = bool((self.cfg.get('ui', {}) or {}).get('face_editor', False)) and FaceEditor is not None
         self._editor = FaceEditor() if self.use_face_editor else None
 
@@ -300,6 +302,8 @@ class App:
             # HUD render
             r_for_hud = self.vision.rvec_smooth if self.vision.rvec_smooth is not None else self.current_rvec
             display = self.hud.render(display, r_for_hud, self.cube.sm)
+            # 2D net render (bottom-right)
+            display = self.net_hud.render(display, self.cube.sm, scale=0.3)
 
             # HUD info
             comp = self.cube.completeness()
